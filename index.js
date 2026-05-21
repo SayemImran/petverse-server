@@ -9,9 +9,12 @@ const port = process.env.PORT || 3001;
 app.use(express.json());
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    origin: [
+      "https://petverse-bd.vercel.app",
+      "http://localhost:3000",
+    ],
     credentials: true,
-  }),
+  })
 );
 
 const uri = process.env.MONGODB_URI;
@@ -29,8 +32,9 @@ const client = new MongoClient(uri, {
 });
 
 
+const clientUrl = process.env.CLIENT_URL || "https://petverse-bd.vercel.app";
 const JWKS = createRemoteJWKSet(
-  new URL(`${process.env.CLIENT_URL}/api/auth/jwks`)
+  new URL(`${clientUrl}/api/auth/jwks`)
 );
 
 const verifyToken = async(req, res, next) => {
@@ -124,7 +128,7 @@ async function run() {
     });
 
     // CREATE NEW PET LISTING
-    app.post("/pets", async (req, res) => {
+    app.post("/pets", verifyToken, async (req, res) => {
       try {
         const petDoc = {
           ...req.body,
@@ -158,23 +162,23 @@ async function run() {
     });
 
     // DELETE PET LISTING (Cascade deletes associated hanging requests too)
-    app.delete("/pets/:id", async (req, res) => {
+    app.delete("/pets/:id", verifyToken, async (req, res) => {
       try {
         const id = req.params.id;
         if (!ObjectId.isValid(id))
-          return res.status(400).send({ error: "Invalid pet ID" });
+          return res.status(400).json({ error: "Invalid pet ID" });
 
         const petResult = await petsCollection.deleteOne({
           _id: new ObjectId(id),
         });
         if (petResult.deletedCount === 0)
-          return res.status(404).send({ error: "Pet already gone" });
+          return res.status(404).json({ error: "Pet already gone" });
 
         // Clean up requests linked to this dead pet
         await requestsCollection.deleteMany({ petId: id });
-        res.send({ message: "Pet and requests deleted successfully" });
+        res.json({ message: "Pet and requests deleted successfully" });
       } catch (err) {
-        res.status(500).send({ error: "Failed to remove pet record" });
+        res.status(500).json({ error: "Failed to remove pet record" });
       }
     });
 
@@ -315,12 +319,11 @@ async function run() {
       }
     });
 
-    app.listen(port, () => {
-      console.log(`Server running flawlessly on port ${port}`);
-    });
+ 
   } catch (err) {
     console.error("Server initialization error:", err);
   }
 }
 
 run();
+module.exports = app; 
