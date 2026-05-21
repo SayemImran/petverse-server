@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const { createRemoteJWKSet, jwtVerify } = require("jose-cjs");
 const app = express();
 const port = process.env.PORT || 3001;
 
@@ -9,9 +10,9 @@ app.use(express.json());
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:3000",
+    credentials: true,
   }),
 );
-
 
 const uri = process.env.MONGODB_URI;
 if (!uri) {
@@ -27,6 +28,27 @@ const client = new MongoClient(uri, {
   },
 });
 
+
+const JWKS = createRemoteJWKSet(
+  new URL("http://localhost:3000/api/auth/jwks")
+);
+
+const verifyToken = async(req, res, next) => {
+  const authHeader = req?.headers.authorization;
+  const token = authHeader?.split(" ")[1];
+  if(!token){
+    return res.status(401).json({message:"Unauthorized"});
+  }
+  console.log("Received Authorization Header:", token);
+try{
+  const {payload} = await jwtVerify(token, JWKS);
+  console.log("Token successfully verified. Payload:", payload);
+   next();
+}catch(err){
+  return res.status(403).json({message:"Forbidden: Invalid or expired token"});
+}
+ 
+};
 async function run() {
   try {
     const db = client.db("petversedb");
@@ -39,9 +61,8 @@ async function run() {
       res.send("PetVerse API is running perfectly.");
     });
 
-    // ==========================================
-    // 1. PUBLIC ROUTE: GET ALL PETS (WITH SEARCH, FILTER, SORT)
-    // ==========================================
+    // PUBLIC ROUTE: GET ALL PETS (WITH SEARCH, FILTER, SORT)
+
     app.get("/pets", async (req, res) => {
       try {
         const { search, species, sort } = req.query;
@@ -54,7 +75,7 @@ async function run() {
 
         // Requirement: Filter pets by species ($in)
         if (species) {
-          const speciesArray = species.split(",").map(s => s.trim());
+          const speciesArray = species.split(",").map((s) => s.trim());
           query.species = { $in: speciesArray };
         }
 
@@ -63,20 +84,24 @@ async function run() {
         if (sort === "feeAsc") sortOption.adoptionFee = 1;
         if (sort === "feeDesc") sortOption.adoptionFee = -1;
 
-        const pets = await petsCollection.find(query).sort(sortOption).toArray();
+        const pets = await petsCollection
+          .find(query)
+          .sort(sortOption)
+          .toArray();
         res.send(pets);
       } catch (err) {
         res.status(500).send({ error: "Failed to fetch pets" });
       }
     });
 
-    // ==========================================
-    // 2. PRIVATE ROUTE: GET OWNED PETS FOR MY LISTINGS
-    // ==========================================
+    // PRIVATE ROUTE: GET OWNED PETS FOR MY LISTINGS
+
     app.get("/pets/owner/:ownerId", async (req, res) => {
       try {
         const { ownerId } = req.params;
-        const ownerPets = await petsCollection.find({ ownerID: ownerId }).toArray();
+        const ownerPets = await petsCollection
+          .find({ ownerID: ownerId })
+          .toArray();
         res.send(ownerPets);
       } catch (err) {
         res.status(500).send({ error: "Failed to fetch owner listings" });
@@ -84,16 +109,17 @@ async function run() {
     });
 
     // GET PET BY ID
-    app.get("/pets/:id", async (req, res) => {
+    app.get("/pets/:id", verifyToken, async (req, res) => {
       try {
         const id = req.params.id;
-        if (!ObjectId.isValid(id)) return res.status(400).send({ error: "Invalid pet ID format" });
-        
+        if (!ObjectId.isValid(id))
+          return res.status(400).json({ error: "Invalid pet ID format" });
+
         const pet = await petsCollection.findOne({ _id: new ObjectId(id) });
-        if (!pet) return res.status(404).send({ error: "Pet not found" });
+        if (!pet) return res.status(404).json({ error: "Pet not found" });
         res.send(pet);
       } catch (err) {
-        res.status(500).send({ error: "Failed to fetch pet details" });
+        res.status(500).json({ error: "Failed to fetch pet details" });
       }
     });
 
@@ -102,7 +128,7 @@ async function run() {
       try {
         const petDoc = {
           ...req.body,
-          status: "Available" // Requirement: Default status value
+          status: "Available", // Requirement: Default status value
         };
         const result = await petsCollection.insertOne(petDoc);
         res.status(201).send(result);
@@ -112,17 +138,18 @@ async function run() {
     });
 
     // UPDATE PET LISTING
-    app.put("/pets/:id", async (req, res) => {
+    app.put("/pets/:id", verifyToken, async (req, res) => {
       try {
         const id = req.params.id;
-        if (!ObjectId.isValid(id)) return res.status(400).send({ error: "Invalid pet ID" });
+        if (!ObjectId.isValid(id))
+          return res.status(400).json({ error: "Invalid pet ID" });
 
         const updatedData = req.body;
         delete updatedData._id;
 
         const result = await petsCollection.updateOne(
           { _id: new ObjectId(id) },
-          { $set: updatedData }
+          { $set: updatedData },
         );
         res.send(result);
       } catch (err) {
@@ -134,10 +161,14 @@ async function run() {
     app.delete("/pets/:id", async (req, res) => {
       try {
         const id = req.params.id;
-        if (!ObjectId.isValid(id)) return res.status(400).send({ error: "Invalid pet ID" });
+        if (!ObjectId.isValid(id))
+          return res.status(400).send({ error: "Invalid pet ID" });
 
-        const petResult = await petsCollection.deleteOne({ _id: new ObjectId(id) });
-        if (petResult.deletedCount === 0) return res.status(404).send({ error: "Pet already gone" });
+        const petResult = await petsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+        if (petResult.deletedCount === 0)
+          return res.status(404).send({ error: "Pet already gone" });
 
         // Clean up requests linked to this dead pet
         await requestsCollection.deleteMany({ petId: id });
@@ -147,30 +178,35 @@ async function run() {
       }
     });
 
-    // ==========================================
-    // 3. ADOPTION REQUEST OPERATIONS & CONTROLS
-    // ==========================================
+    //  ADOPTION REQUEST OPERATIONS & CONTROLS
 
     // SUBMIT NEW ADOPTION FORM
     app.post("/adoptionrequests", async (req, res) => {
       try {
         const { petId, request_user, owner_id } = req.body;
 
-        // Requirement Check 1: Pet owners are not allowed to submit requests
+        //  Pet owners are not allowed to submit requests
         if (request_user === owner_id) {
-          return res.status(400).send({ error: "You cannot submit an adoption request for your own listing." });
+          return res.status(400).send({
+            error:
+              "You cannot submit an adoption request for your own listing.",
+          });
         }
 
-        // Requirement Check 2: Check if pet is already adopted
-        const targetPet = await petsCollection.findOne({ _id: new ObjectId(petId) });
+        //  Check if pet is already adopted
+        const targetPet = await petsCollection.findOne({
+          _id: new ObjectId(petId),
+        });
         if (!targetPet || targetPet.status === "Adopted") {
-          return res.status(400).send({ error: "This pet has already been adopted by someone else." });
+          return res.status(400).send({
+            error: "This pet has already been adopted by someone else.",
+          });
         }
 
         const requestDoc = {
           ...req.body,
           status: "pending",
-          createdAt: new Date()
+          createdAt: new Date(),
         };
 
         const result = await requestsCollection.insertOne(requestDoc);
@@ -184,7 +220,9 @@ async function run() {
     app.get("/adoptionrequests/owner/:ownerId", async (req, res) => {
       try {
         const { ownerId } = req.params;
-        const requests = await requestsCollection.find({ owner_id: ownerId }).toArray();
+        const requests = await requestsCollection
+          .find({ owner_id: ownerId })
+          .toArray();
         res.send(requests);
       } catch (err) {
         res.status(500).send({ error: "Failed to grab incoming requests" });
@@ -195,7 +233,9 @@ async function run() {
     app.get("/adoptionrequests/user/:userId", async (req, res) => {
       try {
         const { userId } = req.params;
-        const requests = await requestsCollection.find({ request_user: userId }).toArray();
+        const requests = await requestsCollection
+          .find({ request_user: userId })
+          .toArray();
         res.send(requests);
       } catch (err) {
         res.status(500).send({ error: "Failed to grab outbound requests" });
@@ -206,57 +246,68 @@ async function run() {
     app.delete("/adoptionrequests/:id", async (req, res) => {
       try {
         const id = req.params.id;
-        const result = await requestsCollection.deleteOne({ _id: new ObjectId(id) });
+        const result = await requestsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
         res.send(result);
       } catch (err) {
         res.status(500).send({ error: "Failed to remove adoption request" });
       }
     });
 
-    // REQUIREMENT PATCH: ACTION COMPONENT FOR ADOPTION APPROVAL/REJECTION CONTROLS
+    // ACTION COMPONENT FOR ADOPTION APPROVAL/REJECTION CONTROLS
     app.patch("/adoptionrequests/:id/status", async (req, res) => {
       try {
         const requestId = req.params.id;
         const { status } = req.body; // Expecting 'approved' or 'rejected'
 
-        if (!ObjectId.isValid(requestId)) return res.status(400).send({ error: "Invalid Request ID" });
+        if (!ObjectId.isValid(requestId))
+          return res.status(400).send({ error: "Invalid Request ID" });
 
-        const targetedRequest = await requestsCollection.findOne({ _id: new ObjectId(requestId) });
-        if (!targetedRequest) return res.status(404).send({ error: "Request not found" });
+        const targetedRequest = await requestsCollection.findOne({
+          _id: new ObjectId(requestId),
+        });
+        if (!targetedRequest)
+          return res.status(404).send({ error: "Request not found" });
 
         const activePetId = targetedRequest.petId;
 
         if (status === "approved") {
-          // 1. Mark this selected application request as approved
+          // Mark this selected application request as approved
           await requestsCollection.updateOne(
             { _id: new ObjectId(requestId) },
-            { $set: { status: "approved" } }
+            { $set: { status: "approved" } },
           );
 
-          // 2. Requirement: Mark the pet status field as Adopted inside the pets collection
+          //  Mark the pet status field as Adopted inside the pets collection
           await petsCollection.updateOne(
             { _id: new ObjectId(activePetId) },
-            { $set: { status: "Adopted" } }
+            { $set: { status: "Adopted" } },
           );
 
-          // 3. Requirement: Prevent further requests by auto-rejecting all remaining pending contenders
+          //  Prevent further requests by auto-rejecting all remaining pending contenders
           await requestsCollection.updateMany(
-            { 
-              petId: activePetId, 
-              _id: { $ne: new ObjectId(requestId) }, 
-              status: "pending" 
+            {
+              petId: activePetId,
+              _id: { $ne: new ObjectId(requestId) },
+              status: "pending",
             },
-            { $set: { status: "rejected" } }
+            { $set: { status: "rejected" } },
           );
 
-          return res.send({ message: "Request approved and alternative options closed successfully." });
+          return res.send({
+            message:
+              "Request approved and alternative options closed successfully.",
+          });
         } else {
-          // Process standard standalone negative rejections cleanly
+          // Handle negative rejections cleanly
           await requestsCollection.updateOne(
             { _id: new ObjectId(requestId) },
-            { $set: { status: "rejected" } }
+            { $set: { status: "rejected" } },
           );
-          return res.send({ message: "Application request formally rejected." });
+          return res.send({
+            message: "Application request formally rejected.",
+          });
         }
       } catch (err) {
         console.error(err);
